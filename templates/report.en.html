@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Race Conditions — Concurrent Programming</title>
+  <style>{{CSS}}</style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="cover">
+    <div class="cover-center">
+      <h1>Race Conditions<br>in Bank Transfers</h1>
+      <p class="cover-subtitle">Computational Experiment Report</p>
+      <p class="cover-description">
+        Comparative evaluation of six synchronization mechanisms —
+        POSIX Pthreads primitives at the application layer and
+        transactional control in PostgreSQL — applied to concurrent
+        bank transfers. The experiment quantifies the impact of
+        race conditions and measures the throughput of each solution.
+      </p>
+    </div>
+    <div class="cover-bottom">
+      <p>{{GENERATED_AT}}</p>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SECTION 1 — INTRODUCTION
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>1. Introduction</h2>
+
+    <p>
+      Imagine two bank tellers simultaneously checking the balance of
+      the same account: both see R$&nbsp;1,000, each calculates
+      independently, and both write the result. The second teller
+      overwrites the first — as if the previous operation never existed.
+      This is the central problem of this work: when multiple
+      <em>threads</em> (execution units running in parallel) access
+      the same data without coordination, the outcome depends on the
+      random order in which the operating system schedules them.
+      This phenomenon is called a <em>race condition</em>.
+    </p>
+
+    <p>
+      In financial systems, the effect is silent and dangerous: money
+      can be created from nothing or disappear without any error
+      message. The program runs normally, logs show everything is
+      fine — but the balances are wrong. This experiment reproduces
+      that scenario at scale and compares six protection mechanisms.
+    </p>
+
+    <h3>1.1 Illustrative Example</h3>
+
+    <p>
+      Table&nbsp;1 shows what happens when two threads operate on the
+      same account simultaneously, starting from a balance of
+      <strong>R$&nbsp;1,000.00</strong>. Each row represents a moment
+      in time; notice how Thread&nbsp;B reads an already-stale balance.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Table 1</strong> — Example of a <em>lost update</em>:
+      Thread&nbsp;A withdraws R$&nbsp;300 and Thread&nbsp;B withdraws R$&nbsp;400
+      concurrently.
+    </p>
+    <table>
+      <tr>
+        <th class="center">Instant</th>
+        <th>Thread A &nbsp;(−R$ 300)</th>
+        <th>Thread B &nbsp;(−R$ 400)</th>
+        <th class="center">Actual balance</th>
+      </tr>
+      <tr>
+        <td class="center">t₁</td>
+        <td>Reads balance → <b>R$ 1,000</b></td>
+        <td class="td-muted">—</td>
+        <td class="center">R$ 1,000</td>
+      </tr>
+      <tr>
+        <td class="center">t₂</td>
+        <td class="td-muted">—</td>
+        <td>Reads balance → <b>R$ 1,000</b></td>
+        <td class="center">R$ 1,000</td>
+      </tr>
+      <tr>
+        <td class="center">t₃</td>
+        <td>Writes 1,000 − 300 = <b>700</b></td>
+        <td class="td-muted">—</td>
+        <td class="center">R$ 700</td>
+      </tr>
+      <tr>
+        <td class="center">t₄</td>
+        <td class="td-muted">—</td>
+        <td class="td-fail">Writes 1,000 − 400 = <b>600</b> ✗</td>
+        <td class="center td-fail"><b>R$ 600</b></td>
+      </tr>
+    </table>
+    </div>
+
+    <p>
+      The correct result would be <strong>R$&nbsp;300.00</strong>
+      (1,000 − 300 − 400). But Thread&nbsp;B read the balance before
+      Thread&nbsp;A finished — so it wrote as if A's withdrawal never
+      happened. This pattern is called a <em>lost update</em>:
+      R$&nbsp;300.00 was created from nothing. The mechanisms in
+      section&nbsp;3 aim to solve exactly this.
+    </p>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SECTION 2 — TEST CONFIGURATION
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>2. Test Configuration</h2>
+
+    <table>
+      <tr>
+        <th>Parameter</th>
+        <th class="center">Value</th>
+        <th>Description</th>
+      </tr>
+      {{CFG_ROWS}}
+    </table>
+
+    <div class="callout callout-info">
+      <strong>Conservation Invariant</strong>
+      The sum of all balances must be identical before and after each
+      scenario. Any deviation means money was created or destroyed by
+      a race condition.
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SECTION 3 — TESTED SCENARIOS
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>3. Tested Scenarios</h2>
+
+    <p>
+      Six approaches are evaluated, from the worst case — complete
+      absence of synchronization — to the most efficient — an atomic
+      operation delegated to the database. Scenarios 1 to 3 control
+      concurrency at the application layer (Pthreads); scenarios 4 to
+      6 delegate control to PostgreSQL.
+    </p>
+
+    <!-- ── SCENARIO 1 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">01</span>
+        <span class="scenario-title">No Control</span>
+        {{SCN_1_BADGES}}
+      </div>
+      {{SCN_1_DYNAMIC}}
+      <h4>Mechanism</h4>
+      <p>
+        No protection is used — it is like two editors opening the
+        same document simultaneously without version control: both
+        start from the same content, make their changes independently,
+        and whoever saves last overwrites the other's work.
+        The <code>sched_yield()</code> call voluntarily yields the CPU
+        between the read and the write, widening the window in which
+        the two threads can interleave and making data corruption
+        consistently observable in tests.
+      </p>
+      <div class="timeline">
+<span class="tl-a">Thread A</span>: SELECT balance = 1000  (account 3)
+<span class="tl-b">Thread B</span>: SELECT balance = 1000  (account 3) ← same value!
+<span class="cm">                                        ↑ race window</span>
+<span class="tl-a">Thread A</span>: UPDATE balance = <span class="tl-ok">900</span>   (subtracted 100)
+<span class="tl-b">Thread B</span>: UPDATE balance = <span class="tl-err">800</span>   (should be 700 — overwrote A!)</div>
+      <h4>Assessment</h4>
+      <table>
+        <tr><th>Criterion</th><th>Assessment</th><th>Note</th></tr>
+        <tr>
+          <td>Correctness</td>
+          <td class="td-fail">❌ None</td>
+          <td class="td-muted">Financial data is corrupted</td>
+        </tr>
+        <tr>
+          <td>Throughput</td>
+          <td class="td-ok">High</td>
+          <td class="td-muted">No lock overhead</td>
+        </tr>
+        <tr>
+          <td>Production use</td>
+          <td class="td-fail">🚫 Never</td>
+          <td class="td-muted">Unacceptable in any real system</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── SCENARIO 2 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">02</span>
+        <span class="scenario-title">pthread_mutex_t</span>
+        {{SCN_2_BADGES}}
+      </div>
+      {{SCN_2_DYNAMIC}}
+      <h4>Mechanism</h4>
+      <p>
+        Works like the key to a shared restroom: whoever grabs the key
+        (<code>pthread_mutex_lock</code>) runs the operation; the others
+        wait outside. When finished, it returns the key
+        (<code>pthread_mutex_unlock</code>) and the next thread can enter.
+        Because there is a single key for <em>all</em> accounts —
+        regardless of which accounts a transfer involves — no two
+        operations run in parallel. This guarantees correctness but
+        eliminates parallelism.
+      </p>
+      <pre><span class="fn">pthread_mutex_lock</span>(&amp;g_lock);    <span class="cm">// grab key — blocks if another thread holds it</span>
+    bf = <span class="fn">pg_read_balance</span>(c, from);
+    bt = <span class="fn">pg_read_balance</span>(c, to);
+    <span class="fn">pg_write_balance</span>(c, from, bf - amt);
+    <span class="fn">pg_write_balance</span>(c, to,   bt + amt);
+<span class="fn">pthread_mutex_unlock</span>(&amp;g_lock);  <span class="cm">// return key — releases for the next thread</span></pre>
+      <h4>Assessment</h4>
+      <table>
+        <tr><th>Criterion</th><th>Assessment</th><th>Note</th></tr>
+        <tr>
+          <td>Correctness</td>
+          <td class="td-ok">✅ Guaranteed</td>
+          <td class="td-muted">Full mutual exclusion</td>
+        </tr>
+        <tr>
+          <td>Scalability</td>
+          <td class="td-fail">Does not scale</td>
+          <td class="td-muted">Global lock serializes independent operations</td>
+        </tr>
+        <tr>
+          <td>Production use</td>
+          <td class="td-warn">🟡 Low contention</td>
+          <td class="td-muted">Suitable for few threads or few accounts</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── SCENARIO 3 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">03</span>
+        <span class="scenario-title">sem_t — POSIX Semaphore</span>
+        {{SCN_3_BADGES}}
+      </div>
+      {{SCN_3_DYNAMIC}}
+      <h4>Mechanism</h4>
+      <p>
+        Think of a parking lot with a vacancy display: a car entering
+        decrements the counter (<code>sem_wait</code>); one leaving
+        increments it (<code>sem_post</code>). If the display reads
+        zero, the car waits at the entrance. Here the semaphore is
+        initialized to&nbsp;1 — a single "slot" — and behaves exactly
+        like the mutex in scenario&nbsp;2. The real difference of a
+        semaphore appears in the producer-consumer pattern:
+        <code>sem_post</code> can be called by a <em>different</em>
+        thread from the one that called <code>sem_wait</code> — the
+        producer wakes the consumer — which a mutex does not allow.
+      </p>
+      <pre><span class="fn">sem_wait</span>(&amp;g_sem);   <span class="cm">// "enter": 1 → 0  (blocks if already zero)</span>
+    bf = <span class="fn">pg_read_balance</span>(c, from);
+    bt = <span class="fn">pg_read_balance</span>(c, to);
+    <span class="fn">pg_write_balance</span>(c, from, bf - amt);
+    <span class="fn">pg_write_balance</span>(c, to,   bt + amt);
+<span class="fn">sem_post</span>(&amp;g_sem);   <span class="cm">// "leave": 0 → 1  (wakes the next thread)</span></pre>
+      <h4>Assessment</h4>
+      <table>
+        <tr><th>Criterion</th><th>Assessment</th><th>Note</th></tr>
+        <tr>
+          <td>Correctness</td>
+          <td class="td-ok">✅ Guaranteed</td>
+          <td class="td-muted">Equivalent to mutex in this context</td>
+        </tr>
+        <tr>
+          <td>Scalability</td>
+          <td class="td-fail">Does not scale</td>
+          <td class="td-muted">Same global lock problem</td>
+        </tr>
+        <tr>
+          <td>Ideal use</td>
+          <td class="td-ok">Coordination</td>
+          <td class="td-muted">Excellent for producer-consumer patterns</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── SCENARIO 4 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">04</span>
+        <span class="scenario-title">SELECT FOR UPDATE</span>
+        {{SCN_4_BADGES}}
+      </div>
+      {{SCN_4_DYNAMIC}}
+      <h4>Mechanism</h4>
+      <p>
+        It is like reserving a library book before picking it up:
+        Thread&nbsp;A places a "reserved" tag on the database rows
+        (<code>FOR UPDATE</code>). Thread&nbsp;B tries the same rows,
+        sees the reservation, and waits. When Thread&nbsp;A commits,
+        the reservation is released and Thread&nbsp;B reads the already
+        updated balances — with no possibility of conflict. Unlike the
+        mutex, the lock is per <em>row</em>: threads operating on
+        different accounts do not block each other. The
+        <code>ORDER BY id</code> ensures all threads reserve rows in
+        the same sequence, preventing <em>deadlocks</em> (where A
+        waits for B and B waits for A, forever).
+      </p>
+      <div class="timeline">
+<span class="tl-a">Thread A</span>: BEGIN
+<span class="tl-a">Thread A</span>: SELECT ... FOR UPDATE  → <span class="tl-ok">lock acquired</span>
+<span class="tl-b">Thread B</span>: SELECT ... FOR UPDATE  → <span class="td-warn">BLOCKED (waiting for A)</span>
+<span class="tl-a">Thread A</span>: UPDATE → COMMIT          → <span class="tl-ok">lock released</span>
+<span class="tl-b">Thread B</span>: <span class="tl-ok">UNBLOCKED</span> — reads balance = <span class="tl-ok">900</span> (correct value)
+<span class="tl-b">Thread B</span>: UPDATE balance = <span class="tl-ok">700</span>  ✓</div>
+      <h4>Assessment</h4>
+      <table>
+        <tr><th>Criterion</th><th>Assessment</th><th>Note</th></tr>
+        <tr>
+          <td>Correctness</td>
+          <td class="td-ok">✅ Guaranteed</td>
+          <td class="td-muted">Row-level lock in the database</td>
+        </tr>
+        <tr>
+          <td>Scalability</td>
+          <td class="td-ok">Scales well</td>
+          <td class="td-muted">Threads on different accounts do not block</td>
+        </tr>
+        <tr>
+          <td>Production use</td>
+          <td class="td-ok">✅ Recommended</td>
+          <td class="td-muted">Ideal for complex business logic</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── SCENARIO 5 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">05</span>
+        <span class="scenario-title">SERIALIZABLE + retry</span>
+        {{SCN_5_BADGES}}
+      </div>
+      {{SCN_5_DYNAMIC}}
+      <h4>Mechanism</h4>
+      <p>
+        It is like a referee watching two players edit the same
+        spreadsheet simultaneously: if the changes would produce an
+        inconsistent result, the referee cancels the last one and asks
+        for a redo from the current state. In the database, PostgreSQL
+        monitors dependencies between transactions; upon detecting a
+        conflict, it aborts one of them with
+        <code>SQLSTATE&nbsp;40001</code> (<em>serialization failure</em>).
+        The application catches the error, issues a <code>ROLLBACK</code>,
+        and retries. The retry count directly measures the contention
+        level — the more conflicts, the more rework.
+      </p>
+      <div class="timeline">
+<span class="tl-a">Thread A</span>: BEGIN ISOLATION LEVEL SERIALIZABLE
+<span class="tl-b">Thread B</span>: BEGIN ISOLATION LEVEL SERIALIZABLE
+<span class="tl-a">Thread A</span>: SELECT 1000 → UPDATE 900 → COMMIT  <span class="tl-ok">✓</span>
+<span class="tl-b">Thread B</span>: SELECT 1000 → UPDATE 800 → COMMIT  <span class="tl-err">✗ SQLSTATE 40001</span>
+<span class="tl-b">Thread B</span>: ROLLBACK → retry → SELECT <span class="tl-ok">900</span> → UPDATE <span class="tl-ok">700</span> → COMMIT  <span class="tl-ok">✓</span></div>
+      <h4>Assessment</h4>
+      <table>
+        <tr><th>Criterion</th><th>Assessment</th><th>Note</th></tr>
+        <tr>
+          <td>Correctness</td>
+          <td class="td-ok">✅ Guaranteed</td>
+          <td class="td-muted">DB detects and resolves conflicts automatically</td>
+        </tr>
+        <tr>
+          <td>Overhead</td>
+          <td class="td-warn">Variable</td>
+          <td class="td-muted">Proportional to the number of retries</td>
+        </tr>
+        <tr>
+          <td>Production use</td>
+          <td class="td-warn">🟡 Low contention</td>
+          <td class="td-muted">Efficient when conflicts are rare</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── SCENARIO 6 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">06</span>
+        <span class="scenario-title">Atomic UPDATE</span>
+        {{SCN_6_BADGES}}
+      </div>
+      {{SCN_6_DYNAMIC}}
+      <h4>Mechanism</h4>
+      <p>
+        The difference lies in <strong>where the calculation happens</strong>.
+        In the common approach, the application fetches the balance,
+        computes the new value, and sends it back — three separate
+        steps that create a time window for interference:
+      </p>
+      <div class="timeline">
+<span class="cm">── Common approach (with race window) ───────────────────</span>
+<span class="tl-a">Thread A</span>: reads   balance = 1000   <span class="cm">← value goes into thread memory</span>
+<span class="tl-a">Thread A</span>: computes 1000 - 100 = 900  <span class="cm">← calculation done outside the DB</span>
+<span class="tl-a">Thread A</span>: writes  balance = 900   <span class="cm">← sends the result back</span>
+<span class="cm">                 ↑ Thread B can read the same 1000 in this window</span>
+
+<span class="cm">── Atomic UPDATE (no window) ────────────────────────────</span>
+<span class="tl-ok">DB</span>: reads + computes + writes  SET balance = balance - 100
+<span class="cm">   all in a single indivisible step, inside the database</span></div>
+      <p>
+        With the atomic UPDATE you do not send a fixed value back —
+        you send an <strong>instruction</strong>:
+        <code>SET balance = balance − 100</code>. The database reads,
+        calculates, and writes entirely internally, without the value
+        ever leaving to the application. It is like the difference
+        between <em>picking up the piggy bank, counting the money,
+        adding coins in your hand, and stuffing it all back</em> versus
+        <em>dropping coins directly through the slot</em>: in the
+        second case the piggy bank never left its place and there is no
+        window for interference. The word <strong>atomic</strong> comes
+        from exactly this idea: the operation is indivisible — it either
+        happens entirely or not at all, never halfway.
+        Accounts are updated in ascending <code>id</code> order
+        (<em>lock ordering</em>) to eliminate the possibility of deadlocks.
+      </p>
+      <table>
+        <tr>
+          <th>Approach</th>
+          <th class="center">DB queries</th>
+          <th class="center">Race possible?</th>
+        </tr>
+        <tr>
+          <td>Separate read + write</td>
+          <td class="center">4</td>
+          <td class="center td-fail">Yes</td>
+        </tr>
+        <tr>
+          <td>SELECT FOR UPDATE</td>
+          <td class="center">3</td>
+          <td class="center td-ok">No</td>
+        </tr>
+        <tr class="row-best">
+          <td><b>Atomic UPDATE</b></td>
+          <td class="center"><b>2</b></td>
+          <td class="center td-ok"><b>No</b></td>
+        </tr>
+      </table>
+      <h4>Assessment</h4>
+      <table>
+        <tr><th>Criterion</th><th>Assessment</th><th>Note</th></tr>
+        <tr>
+          <td>Correctness</td>
+          <td class="td-ok">✅ Guaranteed</td>
+          <td class="td-muted">No read-modify-write</td>
+        </tr>
+        <tr>
+          <td>Scalability</td>
+          <td class="td-ok">Best of the 6</td>
+          <td class="td-muted">Fewer queries, less contention</td>
+        </tr>
+        <tr>
+          <td>Production use</td>
+          <td class="td-ok">✅ Recommended</td>
+          <td class="td-muted">Ideal for simple arithmetic operations</td>
+        </tr>
+      </table>
+    </div>
+
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SECTION 4 — OVERALL COMPARISON
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>4. Overall Comparison</h2>
+
+    <p>
+      Table&nbsp;2 consolidates the results of all scenarios for a
+      direct side-by-side comparison of the evaluated mechanisms.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Table 2</strong> — Comparative results of the six scenarios.
+      🏆 marks the highest throughput with correct data.
+    </p>
+    <table>
+      <tr>
+        <th>Mechanism</th>
+        <th class="center">Level</th>
+        <th class="center">Balance</th>
+        <th class="right">Trans/s</th>
+        <th class="right">Time</th>
+        <th class="right">Retries</th>
+      </tr>
+      {{SUMMARY_ROWS}}
+    </table>
+    </div>
+
+    {{BEST_CALLOUT}}
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SECTION 5 — SCALABILITY
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>5. Scalability</h2>
+
+    <p>
+      An effective synchronization mechanism must not only guarantee
+      data correctness but also scale with increased parallelism.
+      Table&nbsp;3 shows throughput (transfers/second) for each
+      mechanism evaluated at 2, 4, 8, and 16 threads.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Table 3</strong> — Throughput by thread count.
+      ⚠️ indicates a corrupted balance.
+    </p>
+    <table>
+      <tr>
+        <th>Mechanism</th>
+        <th class="center">2 threads</th>
+        <th class="center">4 threads</th>
+        <th class="center">8 threads</th>
+        <th class="center">16 threads</th>
+      </tr>
+      {{SCALING_ROWS}}
+    </table>
+    </div>
+
+    <div class="callout callout-warn">
+      <strong>Why don't mutex and semaphore scale?</strong>
+      The lock in this project is <em>global</em> — a single lock for
+      all transfers. Thread A (accounts 1→2) blocks Thread B
+      (accounts 8→9), even with no real conflict. More threads means
+      more contention, not more parallelism. <code>SELECT FOR UPDATE</code>
+      and the atomic <code>UPDATE</code> use per-<em>row</em> locks,
+      allowing operations on different accounts to run in parallel.
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SECTION 6 — WHY IS THE ATOMIC UPDATE THE BEST SOLUTION?
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>6. Why Is the Atomic UPDATE the Best Solution?</h2>
+
+    <p>
+      With the experimental data in hand, it is possible to explain
+      <em>why</em> each mechanism behaves as it does — not just
+      <em>what</em> each one does.
+    </p>
+
+    <h3>6.1 The Problem Is the Race Window</h3>
+
+    <p>
+      Every bank transfer has three steps: <strong>read</strong> the
+      balance, <strong>compute</strong> the new value, and
+      <strong>write</strong> the result. When these steps are
+      separated, a time window exists between the read and the write —
+      and that is exactly where race conditions occur. Each mechanism
+      tries to close that window in a different way.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Table 5</strong> — Operational cost comparison of each mechanism.
+    </p>
+    <table>
+      <tr>
+        <th>Mechanism</th>
+        <th class="center">DB queries</th>
+        <th class="center">Protection type</th>
+        <th class="center">Scales</th>
+      </tr>
+      <tr>
+        <td>No control</td>
+        <td class="center td-fail">4</td>
+        <td class="center td-fail">None</td>
+        <td class="center td-fail">—</td>
+      </tr>
+      <tr>
+        <td>Mutex / Semaphore</td>
+        <td class="center">4</td>
+        <td class="center td-warn">Global lock (application)</td>
+        <td class="center td-fail">No</td>
+      </tr>
+      <tr>
+        <td>SELECT FOR UPDATE</td>
+        <td class="center">3</td>
+        <td class="center td-ok">Row-level lock (DB)</td>
+        <td class="center td-ok">Yes</td>
+      </tr>
+      <tr>
+        <td>SERIALIZABLE</td>
+        <td class="center td-warn">3 + retries</td>
+        <td class="center td-ok">Conflict detection (DB)</td>
+        <td class="center td-warn">Partial</td>
+      </tr>
+      <tr class="row-best">
+        <td><b>Atomic UPDATE</b></td>
+        <td class="center td-ok"><b>2</b></td>
+        <td class="center td-ok"><b>Atomicity (DB)</b></td>
+        <td class="center td-ok"><b>Yes</b></td>
+      </tr>
+    </table>
+    </div>
+
+    <h3>6.2 Why Mutex and Semaphore Lose</h3>
+
+    <p>
+      Mutex and semaphore use a <strong>global lock</strong>: a single
+      latch for all transfers, regardless of which accounts are
+      involved. It is like a supermarket with ten checkout lanes that
+      forces everyone through a single entrance queue — it doesn't
+      matter that the lanes are independent; all customers pass through
+      the same bottleneck. With more threads, contention grows and
+      performance worsens instead of improving.
+    </p>
+
+    <h3>6.3 Why SELECT FOR UPDATE Is Good, but Not the Best</h3>
+
+    <p>
+      <code>SELECT FOR UPDATE</code> brings an important improvement:
+      the lock is per <em>row</em>, not global. Threads operating on
+      different accounts do not block each other — the supermarket now
+      has separate queues per section. However, it still requires three
+      round-trips to the database (SELECT with lock + two UPDATEs), and
+      the lock stays active from the SELECT until the COMMIT. During that
+      interval, any other thread needing the same accounts must wait.
+    </p>
+
+    <h3>6.4 Why the Atomic UPDATE Wins</h3>
+
+    <p>
+      The atomic UPDATE eliminates the problematic step at the root:
+      the application-side read ceases to exist. Instead of "fetch the
+      value, calculate, send it back", the instruction
+      <code>SET balance = balance − X</code> does everything inside the
+      database in a single indivisible step — like dropping coins
+      directly through the piggy bank slot instead of opening it,
+      counting, and restuffing. No value leaves into thread memory,
+      no time window exists between read and write, nothing for another
+      thread to corrupt. Result: 2 queries per transfer (the fewest of
+      all mechanisms), a row-level lock lasting microseconds, and
+      linear scaling with the number of threads.
+    </p>
+
+    <div class="callout callout-success">
+      <strong>When to use each solution</strong>
+      <b>Atomic UPDATE</b> — simple arithmetic operations: add, subtract,
+      increment balance. No prior read needed.<br><br>
+      <b>SELECT FOR UPDATE</b> — logic that must read before deciding:
+      check minimum balance, verify daily limit, apply business rules
+      before writing.<br><br>
+      <b>Mutex / Semaphore</b> — environments without a relational
+      database, or when the number of threads and resources is small
+      and simplicity matters more than throughput.
+    </div>
+
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SECTION 7 — CONCLUSION
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>7. Conclusion</h2>
+
+    <p>
+      Race conditions are among the most insidious problems in
+      concurrent systems: the program runs without visible errors, but
+      the data it produces is incorrect. In financial systems, this can
+      translate into real monetary losses, accounting inconsistencies,
+      or vulnerabilities exploitable by malicious users.
+    </p>
+
+    <p>
+      The experiments demonstrated that different protection mechanisms
+      impose distinct trade-offs between correctness, throughput, and
+      implementation complexity. The right choice depends on context:
+      simple arithmetic operations benefit from the atomic
+      <code>UPDATE</code>; complex business logic that requires a prior
+      read is better served by <code>SELECT FOR UPDATE</code>;
+      environments without a relational database fall back on mutex
+      or semaphore.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Table 4</strong> — Mechanism ranking by production suitability.
+    </p>
+    <table>
+      <tr>
+        <th class="center">Rank</th>
+        <th>Mechanism</th>
+        <th class="center">Correctness</th>
+        <th class="center">Throughput</th>
+        <th class="center">Scales</th>
+        <th class="center">Complexity</th>
+      </tr>
+      <tr class="rank-1">
+        <td class="center">1</td>
+        <td>Atomic UPDATE</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-ok">High</td>
+        <td class="center td-ok">Yes</td>
+        <td class="center td-ok">Low</td>
+      </tr>
+      <tr class="rank-2">
+        <td class="center">2</td>
+        <td>SELECT FOR UPDATE</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-ok">High</td>
+        <td class="center td-ok">Yes</td>
+        <td class="center td-warn">Medium</td>
+      </tr>
+      <tr class="rank-3">
+        <td class="center">3</td>
+        <td>SERIALIZABLE</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-warn">Variable</td>
+        <td class="center td-warn">Partial</td>
+        <td class="center td-fail">High</td>
+      </tr>
+      <tr>
+        <td class="center">4</td>
+        <td>pthread_mutex_t / sem_t</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-fail">Low</td>
+        <td class="center td-fail">No</td>
+        <td class="center td-ok">Low</td>
+      </tr>
+      <tr>
+        <td class="center">—</td>
+        <td>No control</td>
+        <td class="center td-fail">❌</td>
+        <td class="center td-muted">—</td>
+        <td class="center td-muted">—</td>
+        <td class="center td-muted">—</td>
+      </tr>
+    </table>
+    </div>
+
+  </section>
+
+
+</div>
+</body>
+</html>

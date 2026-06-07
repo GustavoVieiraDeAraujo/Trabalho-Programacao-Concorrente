@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: banco
+    environment:
+      POSTGRES_DB:       banco
+      POSTGRES_USER:     banco
+      POSTGRES_PASSWORD: banco
+    ports:
+      - "5433:5432"
+    command: >
+      postgres
+        -c max_connections=200
+        -c log_min_duration_statement=2000

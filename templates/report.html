@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Race Conditions — Programação Concorrente</title>
+  <style>{{CSS}}</style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="cover">
+    <div class="cover-center">
+      <h1>Race Conditions<br>em Transações Bancárias</h1>
+      <p class="cover-subtitle">Relatório de Experimento Computacional</p>
+      <p class="cover-description">
+        Avaliação comparativa de seis mecanismos de sincronização —
+        primitivos POSIX Pthreads na camada de aplicação e controle
+        transacional no PostgreSQL — aplicados a transferências
+        bancárias concorrentes. O experimento quantifica o impacto
+        de condições de corrida e mede o desempenho de cada solução.
+      </p>
+    </div>
+    <div class="cover-bottom">
+      <p>{{GENERATED_AT}}</p>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SEÇÃO 1 — INTRODUÇÃO
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>1. Introdução</h2>
+
+    <p>
+      Imagine dois caixas de banco que, ao mesmo tempo, consultam o saldo da
+      mesma conta: os dois veem R$&nbsp;1.000, cada um calcula de forma
+      independente e os dois gravam o resultado. O segundo caixa grava por
+      cima do primeiro — como se a operação anterior nunca tivesse existido.
+      Esse é o problema central deste trabalho: quando múltiplas
+      <em>threads</em> (linhas de execução que rodam em paralelo) acessam o
+      mesmo dado sem coordenação, o resultado depende da ordem aleatória em
+      que o sistema operacional as escalona. Esse fenômeno é chamado de
+      <em>condição de corrida</em> (<em>race condition</em>).
+    </p>
+
+    <p>
+      Em sistemas financeiros, o efeito é silencioso e perigoso: dinheiro
+      pode ser criado do nada ou desaparecer sem nenhuma mensagem de erro.
+      O programa executa normalmente, os registros mostram tudo correto —
+      mas os saldos estão errados. Este experimento reproduz esse cenário
+      em escala e compara seis mecanismos de proteção diferentes.
+    </p>
+
+    <h3>1.1 Exemplo Ilustrativo</h3>
+
+    <p>
+      A Tabela&nbsp;1 mostra o que acontece quando duas threads operam sobre
+      a mesma conta ao mesmo tempo, partindo de um saldo de
+      <strong>R$&nbsp;1.000,00</strong>. Cada linha representa um instante
+      de tempo; observe como Thread&nbsp;B lê um saldo já desatualizado.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Tabela 1</strong> — Exemplo de <em>lost update</em>:
+      Thread&nbsp;A saca R$&nbsp;300 e Thread&nbsp;B saca R$&nbsp;400
+      de forma concorrente.
+    </p>
+    <table>
+      <tr>
+        <th class="center">Instante</th>
+        <th>Thread A &nbsp;(−R$ 300)</th>
+        <th>Thread B &nbsp;(−R$ 400)</th>
+        <th class="center">Saldo real</th>
+      </tr>
+      <tr>
+        <td class="center">t₁</td>
+        <td>Lê saldo → <b>R$ 1.000</b></td>
+        <td class="td-muted">—</td>
+        <td class="center">R$ 1.000</td>
+      </tr>
+      <tr>
+        <td class="center">t₂</td>
+        <td class="td-muted">—</td>
+        <td>Lê saldo → <b>R$ 1.000</b></td>
+        <td class="center">R$ 1.000</td>
+      </tr>
+      <tr>
+        <td class="center">t₃</td>
+        <td>Grava 1.000 − 300 = <b>700</b></td>
+        <td class="td-muted">—</td>
+        <td class="center">R$ 700</td>
+      </tr>
+      <tr>
+        <td class="center">t₄</td>
+        <td class="td-muted">—</td>
+        <td class="td-fail">Grava 1.000 − 400 = <b>600</b> ✗</td>
+        <td class="center td-fail"><b>R$ 600</b></td>
+      </tr>
+    </table>
+    </div>
+
+    <p>
+      O resultado correto seria <strong>R$&nbsp;300,00</strong>
+      (1.000 − 300 − 400). Mas Thread&nbsp;B leu o saldo antes de Thread&nbsp;A
+      terminar — então gravou como se o saque de A nunca tivesse acontecido.
+      Esse padrão chama-se <em>lost update</em> (atualização perdida):
+      R$&nbsp;300,00 foram criados do nada. Os mecanismos da
+      seção&nbsp;3 se propõem a resolver exatamente isso.
+    </p>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SEÇÃO 2 — CONFIGURAÇÃO DOS TESTES
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>2. Configuração dos Testes</h2>
+
+    <table>
+      <tr>
+        <th>Parâmetro</th>
+        <th class="center">Valor</th>
+        <th>Descrição</th>
+      </tr>
+      {{CFG_ROWS}}
+    </table>
+
+    <div class="callout callout-info">
+      <strong>Invariante de Conservação</strong>
+      A soma de todos os saldos deve ser idêntica antes e após cada cenário.
+      Qualquer desvio indica que dinheiro foi criado ou destruído por uma
+      condição de corrida.
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SEÇÃO 3 — CENÁRIOS TESTADOS
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>3. Cenários Testados</h2>
+
+    <p>
+      Seis abordagens são avaliadas, do pior caso — ausência total de
+      sincronização — ao mais eficiente — operação atômica delegada ao banco
+      de dados. Os cenários 1 a 3 controlam a concorrência na camada da
+      aplicação (Pthreads); os cenários 4 a 6 delegam o controle ao PostgreSQL.
+    </p>
+
+    <!-- ── CENÁRIO 1 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">01</span>
+        <span class="scenario-title">Sem Controle</span>
+        {{SCN_1_BADGES}}
+      </div>
+      {{SCN_1_DYNAMIC}}
+      <h4>Mecanismo</h4>
+      <p>
+        Nenhuma proteção é usada — é como dois editores abrindo o mesmo
+        documento ao mesmo tempo, sem controle de versão: os dois partem do
+        mesmo conteúdo, fazem suas alterações de forma independente, e o
+        que salvar por último apaga o trabalho do outro. A chamada
+        <code>sched_yield()</code> cede voluntariamente a CPU entre a leitura
+        e a escrita, ampliando a janela em que as duas threads podem se
+        cruzar e tornando a corrupção de dados sempre observável nos testes.
+      </p>
+      <div class="timeline">
+<span class="tl-a">Thread A</span>: SELECT balance = 1000  (conta 3)
+<span class="tl-b">Thread B</span>: SELECT balance = 1000  (conta 3) ← mesmo valor!
+<span class="cm">                                        ↑ janela de corrida</span>
+<span class="tl-a">Thread A</span>: UPDATE balance = <span class="tl-ok">900</span>   (subtraiu 100)
+<span class="tl-b">Thread B</span>: UPDATE balance = <span class="tl-err">800</span>   (deveria ser 700 — sobrescreveu A!)</div>
+      <h4>Avaliação</h4>
+      <table>
+        <tr><th>Critério</th><th>Avaliação</th><th>Observação</th></tr>
+        <tr>
+          <td>Corretude</td>
+          <td class="td-fail">❌ Nenhuma</td>
+          <td class="td-muted">Dados financeiros corrompidos</td>
+        </tr>
+        <tr>
+          <td>Throughput</td>
+          <td class="td-ok">Alto</td>
+          <td class="td-muted">Sem overhead de lock</td>
+        </tr>
+        <tr>
+          <td>Uso em produção</td>
+          <td class="td-fail">🚫 Nunca</td>
+          <td class="td-muted">Inaceitável em qualquer sistema real</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── CENÁRIO 2 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">02</span>
+        <span class="scenario-title">pthread_mutex_t</span>
+        {{SCN_2_BADGES}}
+      </div>
+      {{SCN_2_DYNAMIC}}
+      <h4>Mecanismo</h4>
+      <p>
+        Funciona como a chave de um banheiro compartilhado: quem pegar a
+        chave (<code>pthread_mutex_lock</code>) executa a operação; os outros
+        esperam do lado de fora. Quando termina, devolve a chave
+        (<code>pthread_mutex_unlock</code>) e a próxima thread pode entrar.
+        Como há uma única chave para <em>todas</em> as contas — independente
+        de quais contas a transferência envolve — nenhuma operação ocorre em
+        paralelo. Isso garante corretude, mas elimina o paralelismo.
+      </p>
+      <pre><span class="fn">pthread_mutex_lock</span>(&amp;g_lock);    <span class="cm">// pega a chave — bloqueia se outra thread a tem</span>
+    bf = <span class="fn">pg_read_bal</span>(c, from);
+    bt = <span class="fn">pg_read_bal</span>(c, to);
+    <span class="fn">pg_write_bal</span>(c, from, bf - amt);
+    <span class="fn">pg_write_bal</span>(c, to,   bt + amt);
+<span class="fn">pthread_mutex_unlock</span>(&amp;g_lock);  <span class="cm">// devolve a chave — libera para a próxima thread</span></pre>
+      <h4>Avaliação</h4>
+      <table>
+        <tr><th>Critério</th><th>Avaliação</th><th>Observação</th></tr>
+        <tr>
+          <td>Corretude</td>
+          <td class="td-ok">✅ Garantida</td>
+          <td class="td-muted">Exclusão mútua completa</td>
+        </tr>
+        <tr>
+          <td>Escalabilidade</td>
+          <td class="td-fail">Não escala</td>
+          <td class="td-muted">Lock global serializa operações independentes</td>
+        </tr>
+        <tr>
+          <td>Uso em produção</td>
+          <td class="td-warn">🟡 Baixa contenção</td>
+          <td class="td-muted">Adequado para poucos threads ou poucas contas</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── CENÁRIO 3 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">03</span>
+        <span class="scenario-title">sem_t — Semáforo POSIX</span>
+        {{SCN_3_BADGES}}
+      </div>
+      {{SCN_3_DYNAMIC}}
+      <h4>Mecanismo</h4>
+      <p>
+        Pense num estacionamento com painel de vagas: quem entra decrementa
+        o contador (<code>sem_wait</code>); quem sai o incrementa
+        (<code>sem_post</code>). Se o painel marca zero, o carro aguarda na
+        entrada. Aqui o semáforo é inicializado com valor&nbsp;1 — uma única
+        "vaga" — e se comporta exatamente como o mutex do cenário&nbsp;2.
+        A diferença real do semáforo aparece no padrão produtor-consumidor:
+        o <code>sem_post</code> pode ser chamado por uma thread
+        <em>diferente</em> da que chamou <code>sem_wait</code> — o produtor
+        acorda o consumidor — o que o mutex não permite.
+      </p>
+      <pre><span class="fn">sem_wait</span>(&amp;g_sem);   <span class="cm">// "entra": 1 → 0  (bloqueia se já zero)</span>
+    bf = <span class="fn">pg_read_bal</span>(c, from);
+    bt = <span class="fn">pg_read_bal</span>(c, to);
+    <span class="fn">pg_write_bal</span>(c, from, bf - amt);
+    <span class="fn">pg_write_bal</span>(c, to,   bt + amt);
+<span class="fn">sem_post</span>(&amp;g_sem);   <span class="cm">// "sai":  0 → 1  (acorda a próxima thread)</span></pre>
+      <h4>Avaliação</h4>
+      <table>
+        <tr><th>Critério</th><th>Avaliação</th><th>Observação</th></tr>
+        <tr>
+          <td>Corretude</td>
+          <td class="td-ok">✅ Garantida</td>
+          <td class="td-muted">Equivalente ao mutex neste contexto</td>
+        </tr>
+        <tr>
+          <td>Escalabilidade</td>
+          <td class="td-fail">Não escala</td>
+          <td class="td-muted">Mesmo problema do lock global</td>
+        </tr>
+        <tr>
+          <td>Uso ideal</td>
+          <td class="td-ok">Coordenação</td>
+          <td class="td-muted">Excelente para produtor-consumidor</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── CENÁRIO 4 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">04</span>
+        <span class="scenario-title">SELECT FOR UPDATE</span>
+        {{SCN_4_BADGES}}
+      </div>
+      {{SCN_4_DYNAMIC}}
+      <h4>Mecanismo</h4>
+      <p>
+        É como reservar um livro na prateleira antes de pegá-lo: Thread&nbsp;A
+        coloca uma etiqueta de "reservado" nas linhas do banco
+        (<code>FOR UPDATE</code>). Thread&nbsp;B tenta as mesmas linhas, vê a
+        reserva e aguarda. Quando Thread&nbsp;A conclui (COMMIT), a reserva
+        some e Thread&nbsp;B lê os saldos já atualizados — sem possibilidade
+        de conflito. Diferente do mutex, o lock é por <em>linha</em>: threads
+        operando em contas distintas não se bloqueiam mutuamente. O
+        <code>ORDER BY id</code> garante que todas as threads reservam linhas
+        na mesma sequência, evitando <em>deadlock</em> (situação em que A
+        espera B e B espera A ao mesmo tempo, para sempre).
+      </p>
+      <div class="timeline">
+<span class="tl-a">Thread A</span>: BEGIN
+<span class="tl-a">Thread A</span>: SELECT ... FOR UPDATE  → <span class="tl-ok">reserva adquirida</span>
+<span class="tl-b">Thread B</span>: SELECT ... FOR UPDATE  → <span class="td-warn">BLOQUEADA (aguarda A)</span>
+<span class="tl-a">Thread A</span>: UPDATE → COMMIT          → <span class="tl-ok">reserva liberada</span>
+<span class="tl-b">Thread B</span>: <span class="tl-ok">DESBLOQUEADA</span> — lê balance = <span class="tl-ok">900</span> (valor correto)
+<span class="tl-b">Thread B</span>: UPDATE balance = <span class="tl-ok">700</span>  ✓</div>
+      <h4>Avaliação</h4>
+      <table>
+        <tr><th>Critério</th><th>Avaliação</th><th>Observação</th></tr>
+        <tr>
+          <td>Corretude</td>
+          <td class="td-ok">✅ Garantida</td>
+          <td class="td-muted">Row-level lock no banco</td>
+        </tr>
+        <tr>
+          <td>Escalabilidade</td>
+          <td class="td-ok">Escala bem</td>
+          <td class="td-muted">Threads em contas distintas não se bloqueiam</td>
+        </tr>
+        <tr>
+          <td>Uso em produção</td>
+          <td class="td-ok">✅ Recomendado</td>
+          <td class="td-muted">Ideal para lógica de negócio complexa</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── CENÁRIO 5 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">05</span>
+        <span class="scenario-title">SERIALIZABLE + retry</span>
+        {{SCN_5_BADGES}}
+      </div>
+      {{SCN_5_DYNAMIC}}
+      <h4>Mecanismo</h4>
+      <p>
+        É como um árbitro observando dois jogadores editando a mesma planilha
+        ao mesmo tempo: se as alterações criariam um resultado inconsistente,
+        o árbitro cancela a última e pede para refazer desde o estado atual.
+        No banco de dados, o PostgreSQL monitora dependências entre transações;
+        ao detectar conflito, aborta uma delas com o código
+        <code>SQLSTATE&nbsp;40001</code> (<em>serialization failure</em>).
+        A aplicação captura o erro, faz <code>ROLLBACK</code> e tenta
+        novamente. O número de retentativas (<em>retries</em>) mede
+        diretamente o nível de contenção — quanto mais conflito, mais
+        retrabalho.
+      </p>
+      <div class="timeline">
+<span class="tl-a">Thread A</span>: BEGIN ISOLATION LEVEL SERIALIZABLE
+<span class="tl-b">Thread B</span>: BEGIN ISOLATION LEVEL SERIALIZABLE
+<span class="tl-a">Thread A</span>: SELECT 1000 → UPDATE 900 → COMMIT  <span class="tl-ok">✓</span>
+<span class="tl-b">Thread B</span>: SELECT 1000 → UPDATE 800 → COMMIT  <span class="tl-err">✗ SQLSTATE 40001</span>
+<span class="tl-b">Thread B</span>: ROLLBACK → retry → SELECT <span class="tl-ok">900</span> → UPDATE <span class="tl-ok">700</span> → COMMIT  <span class="tl-ok">✓</span></div>
+      <h4>Avaliação</h4>
+      <table>
+        <tr><th>Critério</th><th>Avaliação</th><th>Observação</th></tr>
+        <tr>
+          <td>Corretude</td>
+          <td class="td-ok">✅ Garantida</td>
+          <td class="td-muted">BD detecta e resolve conflitos automaticamente</td>
+        </tr>
+        <tr>
+          <td>Overhead</td>
+          <td class="td-warn">Variável</td>
+          <td class="td-muted">Proporcional ao número de retries</td>
+        </tr>
+        <tr>
+          <td>Uso em produção</td>
+          <td class="td-warn">🟡 Baixa contenção</td>
+          <td class="td-muted">Eficiente quando conflitos são raros</td>
+        </tr>
+      </table>
+    </div>
+
+
+    <!-- ── CENÁRIO 6 ── -->
+    <div class="scenario-card">
+      <div class="scenario-header">
+        <span class="scenario-num">06</span>
+        <span class="scenario-title">UPDATE Atômico</span>
+        {{SCN_6_BADGES}}
+      </div>
+      {{SCN_6_DYNAMIC}}
+      <h4>Mecanismo</h4>
+      <p>
+        A diferença está em <strong>onde o cálculo acontece</strong>. Na
+        abordagem comum, a aplicação busca o saldo, faz a conta e devolve
+        o resultado — três passos separados que criam uma janela de tempo
+        para interferência:
+      </p>
+      <div class="timeline">
+<span class="cm">── Abordagem comum (com janela de corrida) ──────────────</span>
+<span class="tl-a">Thread A</span>: lê    balance = 1000   <span class="cm">← valor vai para a memória da thread</span>
+<span class="tl-a">Thread A</span>: calcula 1000 - 100 = 900  <span class="cm">← conta feita fora do banco</span>
+<span class="tl-a">Thread A</span>: grava  balance = 900   <span class="cm">← manda o resultado de volta</span>
+<span class="cm">                 ↑ Thread B pode ler o mesmo 1000 nessa janela</span>
+
+<span class="cm">── UPDATE atômico (sem janela) ──────────────────────────</span>
+<span class="tl-ok">Banco</span>: lê + calcula + grava  SET balance = balance - 100
+<span class="cm">         tudo em um único passo indivisível, dentro do banco</span></div>
+      <p>
+        No UPDATE atômico você não manda um valor fixo de volta — você manda
+        uma <strong>instrução</strong>: <code>SET balance = balance − 100</code>.
+        O banco lê, calcula e grava tudo internamente, sem que o valor saia
+        para a aplicação em nenhum momento. É como a diferença entre
+        <em>pegar o cofrinho, contar o dinheiro, adicionar as moedas na mão e
+        enfiar tudo de volta</em> versus <em>passar as moedas direto pela
+        fenda</em>: no segundo caso, o cofrinho nunca saiu do lugar e não há
+        janela para interferência. A palavra <strong>atômico</strong> vem
+        exatamente dessa ideia: a operação é indivisível, ou acontece inteira
+        ou não acontece — nunca pela metade. As contas são atualizadas em
+        ordem crescente de <code>id</code> (<em>lock ordering</em>) para
+        eliminar a possibilidade de deadlock.
+      </p>
+      <table>
+        <tr>
+          <th>Abordagem</th>
+          <th class="center">Queries ao BD</th>
+          <th class="center">Race possível?</th>
+        </tr>
+        <tr>
+          <td>Leitura + escrita separadas</td>
+          <td class="center">4</td>
+          <td class="center td-fail">Sim</td>
+        </tr>
+        <tr>
+          <td>SELECT FOR UPDATE</td>
+          <td class="center">3</td>
+          <td class="center td-ok">Não</td>
+        </tr>
+        <tr class="row-best">
+          <td><b>UPDATE atômico</b></td>
+          <td class="center"><b>2</b></td>
+          <td class="center td-ok"><b>Não</b></td>
+        </tr>
+      </table>
+      <h4>Avaliação</h4>
+      <table>
+        <tr><th>Critério</th><th>Avaliação</th><th>Observação</th></tr>
+        <tr>
+          <td>Corretude</td>
+          <td class="td-ok">✅ Garantida</td>
+          <td class="td-muted">Sem read-modify-write</td>
+        </tr>
+        <tr>
+          <td>Escalabilidade</td>
+          <td class="td-ok">Melhor dos 6</td>
+          <td class="td-muted">Menos queries, menos contenção</td>
+        </tr>
+        <tr>
+          <td>Uso em produção</td>
+          <td class="td-ok">✅ Recomendado</td>
+          <td class="td-muted">Ideal para operações aritméticas simples</td>
+        </tr>
+      </table>
+    </div>
+
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SEÇÃO 4 — COMPARAÇÃO GERAL
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>4. Comparação Geral</h2>
+
+    <p>
+      A Tabela&nbsp;2 consolida os resultados de todos os cenários para
+      facilitar a comparação direta entre os mecanismos avaliados.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Tabela 2</strong> — Resultados comparativos dos seis cenários.
+      🏆 indica o maior throughput com dados corretos.
+    </p>
+    <table>
+      <tr>
+        <th>Mecanismo</th>
+        <th class="center">Nível</th>
+        <th class="center">Saldo</th>
+        <th class="right">Transf/s</th>
+        <th class="right">Tempo</th>
+        <th class="right">Retries</th>
+      </tr>
+      {{SUMMARY_ROWS}}
+    </table>
+    </div>
+
+    {{BEST_CALLOUT}}
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SEÇÃO 5 — ESCALABILIDADE
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>5. Escalabilidade</h2>
+
+    <p>
+      Um mecanismo de sincronização eficaz deve não apenas garantir a
+      corretude dos dados, mas também escalar com o aumento do paralelismo.
+      A Tabela&nbsp;3 exibe o throughput (transferências/segundo) para cada
+      mecanismo avaliado em configurações com 2, 4, 8 e 16 threads.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Tabela 3</strong> — Throughput por número de threads.
+      ⚠️ indica saldo corrompido.
+    </p>
+    <table>
+      <tr>
+        <th>Mecanismo</th>
+        <th class="center">2 threads</th>
+        <th class="center">4 threads</th>
+        <th class="center">8 threads</th>
+        <th class="center">16 threads</th>
+      </tr>
+      {{SCALING_ROWS}}
+    </table>
+    </div>
+
+    <div class="callout callout-warn">
+      <strong>Por que mutex e semáforo não escalam?</strong>
+      O lock neste projeto é <em>global</em> — uma única trava para todas as
+      transferências. Thread A (contas 1→2) bloqueia Thread B (contas 8→9),
+      mesmo sem conflito real. Mais threads significam mais contenção, não
+      mais paralelismo. O <code>SELECT FOR UPDATE</code> e o
+      <code>UPDATE</code> atômico utilizam locks por <em>linha</em>, permitindo
+      que operações sobre contas distintas ocorram em paralelo.
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SEÇÃO 6 — POR QUE O UPDATE ATÔMICO É A MELHOR SOLUÇÃO?
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>6. Por que o UPDATE Atômico é a Melhor Solução?</h2>
+
+    <p>
+      Com os dados dos experimentos em mãos, é possível explicar
+      <em>por quê</em> cada mecanismo se comporta como se comporta — e não
+      apenas <em>o que</em> cada um faz.
+    </p>
+
+    <h3>6.1 O Problema é a Janela de Corrida</h3>
+
+    <p>
+      Toda transferência bancária tem três etapas: <strong>ler</strong> o
+      saldo, <strong>calcular</strong> o novo valor e <strong>gravar</strong>
+      o resultado. Quando essas etapas são separadas, existe uma janela de
+      tempo entre a leitura e a gravação — e é exatamente nessa janela que
+      as condições de corrida ocorrem. Cada mecanismo tenta fechar essa
+      janela de uma forma diferente.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Tabela 5</strong> — Comparação do custo operacional de cada mecanismo.
+    </p>
+    <table>
+      <tr>
+        <th>Mecanismo</th>
+        <th class="center">Queries ao BD</th>
+        <th class="center">Tipo de proteção</th>
+        <th class="center">Escala</th>
+      </tr>
+      <tr>
+        <td>Sem controle</td>
+        <td class="center td-fail">4</td>
+        <td class="center td-fail">Nenhuma</td>
+        <td class="center td-fail">—</td>
+      </tr>
+      <tr>
+        <td>Mutex / Semáforo</td>
+        <td class="center">4</td>
+        <td class="center td-warn">Lock global (aplicação)</td>
+        <td class="center td-fail">Não</td>
+      </tr>
+      <tr>
+        <td>SELECT FOR UPDATE</td>
+        <td class="center">3</td>
+        <td class="center td-ok">Lock por linha (BD)</td>
+        <td class="center td-ok">Sim</td>
+      </tr>
+      <tr>
+        <td>SERIALIZABLE</td>
+        <td class="center td-warn">3 + retries</td>
+        <td class="center td-ok">Detecção de conflito (BD)</td>
+        <td class="center td-warn">Parcial</td>
+      </tr>
+      <tr class="row-best">
+        <td><b>UPDATE atômico</b></td>
+        <td class="center td-ok"><b>2</b></td>
+        <td class="center td-ok"><b>Atomicidade (BD)</b></td>
+        <td class="center td-ok"><b>Sim</b></td>
+      </tr>
+    </table>
+    </div>
+
+    <h3>6.2 Por que Mutex e Semáforo Perdem</h3>
+
+    <p>
+      Mutex e semáforo usam um <strong>lock global</strong>: uma única trava
+      para todas as transferências, independentemente de quais contas estão
+      envolvidas. É como um supermercado com dez caixas que exige uma fila
+      única antes da entrada — não importa que os caixas sejam independentes,
+      todos os clientes passam pelo mesmo gargalo. Com mais threads, a
+      contenção aumenta e o desempenho piora em vez de melhorar.
+    </p>
+
+    <h3>6.3 Por que SELECT FOR UPDATE é Bom, mas Não o Melhor</h3>
+
+    <p>
+      O <code>SELECT FOR UPDATE</code> traz um avanço importante: o lock é
+      por <em>linha</em>, não global. Threads operando em contas distintas
+      não se bloqueiam — o supermercado agora tem filas separadas por setor.
+      Porém, ainda exige três idas ao banco (SELECT com lock + dois UPDATEs),
+      e o lock fica ativo desde o SELECT até o COMMIT. Durante esse intervalo,
+      qualquer outra thread que precise das mesmas contas fica esperando.
+    </p>
+
+    <h3>6.4 Por que o UPDATE Atômico Vence</h3>
+
+    <p>
+      O UPDATE atômico elimina a etapa problemática na raiz: a leitura na
+      aplicação deixa de existir. Em vez de "busque o valor, calcule, devolva",
+      a instrução <code>SET balance = balance − X</code> faz tudo dentro do
+      banco em um único passo indivisível — como passar moedas direto pela
+      fenda do cofrinho em vez de abri-lo, contar e recolocar. Não há valor
+      saindo para a memória da thread, não há janela de tempo entre leitura e
+      gravação, não há nada para outra thread corromper. Resultado: 2 queries
+      por transferência (as menores entre todos os mecanismos), lock de linha
+      que dura microssegundos e escala linear com o número de threads.
+    </p>
+
+    <div class="callout callout-success">
+      <strong>Quando usar cada solução</strong>
+      <b>UPDATE atômico</b> — operações aritméticas simples: somar, subtrair,
+      incrementar saldo. Sem necessidade de leitura prévia.<br><br>
+      <b>SELECT FOR UPDATE</b> — lógica que precisa ler antes de decidir:
+      verificar saldo mínimo, checar limite diário, aplicar regras de negócio
+      antes de gravar.<br><br>
+      <b>Mutex / Semáforo</b> — ambientes sem banco de dados relacional, ou
+      quando o número de threads e recursos é pequeno e a simplicidade importa
+      mais que o desempenho.
+    </div>
+
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SEÇÃO 7 — CONCLUSÃO
+       ══════════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>7. Conclusão</h2>
+
+    <p>
+      Condições de corrida constituem um dos problemas mais insidiosos em
+      sistemas concorrentes: o programa executa sem erros visíveis, mas os
+      dados produzidos são incorretos. Em sistemas financeiros, isso pode
+      se traduzir em perdas monetárias reais, inconsistências contábeis ou
+      vulnerabilidades exploráveis por usuários maliciosos.
+    </p>
+
+    <p>
+      Os experimentos demonstraram que diferentes mecanismos de proteção
+      impõem trade-offs distintos entre corretude, throughput e complexidade
+      de implementação. A escolha adequada depende do contexto: operações
+      aritméticas simples beneficiam-se do <code>UPDATE</code> atômico;
+      lógica de negócio complexa que exige leitura prévia é melhor servida
+      pelo <code>SELECT FOR UPDATE</code>; ambientes sem banco de dados
+      relacional recorrem a mutex ou semáforo.
+    </p>
+
+    <div class="table-wrapper">
+    <p class="table-caption">
+      <strong>Tabela 4</strong> — Ranking dos mecanismos por adequação para produção.
+    </p>
+    <table>
+      <tr>
+        <th class="center">Pos.</th>
+        <th>Mecanismo</th>
+        <th class="center">Corretude</th>
+        <th class="center">Throughput</th>
+        <th class="center">Escala</th>
+        <th class="center">Complexidade</th>
+      </tr>
+      <tr class="rank-1">
+        <td class="center">1</td>
+        <td>UPDATE atômico</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-ok">Alto</td>
+        <td class="center td-ok">Sim</td>
+        <td class="center td-ok">Baixa</td>
+      </tr>
+      <tr class="rank-2">
+        <td class="center">2</td>
+        <td>SELECT FOR UPDATE</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-ok">Alto</td>
+        <td class="center td-ok">Sim</td>
+        <td class="center td-warn">Média</td>
+      </tr>
+      <tr class="rank-3">
+        <td class="center">3</td>
+        <td>SERIALIZABLE</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-warn">Variável</td>
+        <td class="center td-warn">Parcial</td>
+        <td class="center td-fail">Alta</td>
+      </tr>
+      <tr>
+        <td class="center">4</td>
+        <td>pthread_mutex_t / sem_t</td>
+        <td class="center td-ok">✅</td>
+        <td class="center td-fail">Baixo</td>
+        <td class="center td-fail">Não</td>
+        <td class="center td-ok">Baixa</td>
+      </tr>
+      <tr>
+        <td class="center">—</td>
+        <td>Sem controle</td>
+        <td class="center td-fail">❌</td>
+        <td class="center td-muted">—</td>
+        <td class="center td-muted">—</td>
+        <td class="center td-muted">—</td>
+      </tr>
+    </table>
+    </div>
+
+  </section>
+
+
+</div>
+</body>
+</html>

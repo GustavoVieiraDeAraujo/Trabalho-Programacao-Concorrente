@@ -1,0 +1,16 @@
+# Build artifacts
+bin/
+build/
+
+# Generated reports
+results/
+
+# Compiled objects
+*.o
+*.a
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~

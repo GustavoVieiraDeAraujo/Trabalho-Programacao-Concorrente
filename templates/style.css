@@ -1,0 +1,412 @@
+/*
+ * style.css — ABNT NBR 14724 / A4
+ * Fonte Arial 12pt, entrelinhas 1,5, margens 3cm/2cm/2cm/3cm
+ */
+
+/* ══════════════════════════════════════════════════════
+ * @PAGE — A4, margens ABNT, numeração topo-direito
+ * ══════════════════════════════════════════════════════ */
+@page {
+    size: A4 portrait;
+    margin: 3cm 2cm 2cm 3cm;
+    @top-right {
+        content:     counter(page);
+        font-size:   10pt;
+        font-family: Arial, Helvetica, sans-serif;
+        color:       #222;
+    }
+}
+/* capa: sem número de página */
+@page :first {
+    @top-right { content: ''; }
+}
+
+/* ══════════════════════════════════════════════════════
+ * BASE
+ * ══════════════════════════════════════════════════════ */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size:   12pt;
+    line-height: 1.5;
+    color:       #111;
+    background:  #fff;
+    overflow:    hidden;
+}
+
+.container { width: 100%; }
+
+/* ══════════════════════════════════════════════════════
+ * CAPA  (ABNT: instituição no topo, título ao centro,
+ *         cidade/ano na base — tudo centralizado)
+ * ══════════════════════════════════════════════════════ */
+.cover {
+    min-height:       22cm;
+    display:          flex;
+    flex-direction:   column;
+    align-items:      center;
+    text-align:       center;
+    page-break-after: always;
+    padding:          2cm 0 1.5cm;
+}
+
+/* Todos os parágrafos e textos dentro da capa são centralizados.
+   Necessário porque p { text-align: justify } tem especificidade
+   maior que o text-align herdado de .cover. */
+.cover p,
+.cover h1,
+.cover h2 {
+    text-align:  center;
+    text-indent: 0;
+}
+
+/* width: 100% nos três blocos garante que text-align: center
+   funcione em relação à largura total da página, não à largura
+   do conteúdo encolhido pelo flex. */
+.cover-center,
+.cover-bottom { width: 100%; }
+
+/* cover-center ocupa todo o espaço disponível e centraliza verticalmente */
+.cover-center {
+    flex:            1;
+    display:         flex;
+    flex-direction:  column;
+    justify-content: center;
+}
+
+.cover-center h1 {
+    font-size:      14pt;
+    font-weight:    700;
+    text-transform: uppercase;
+    line-height:    1.4;
+    margin-bottom:  18pt;
+    text-align:     center;
+    text-indent:    0;
+}
+
+.cover-subtitle {
+    font-size:     12pt;
+    font-weight:   400;
+    margin-bottom: 24pt;
+    font-style:    italic;
+    text-align:    center;
+    text-indent:   0;
+}
+
+/* Bloco de descrição: largura explícita + margin auto = centralizado.
+   max-width sozinho não ativa margin:auto — precisa de width.
+   Especificidade 0,2,0 garante text-align: justify sobre .cover p. */
+.cover .cover-description {
+    font-size:   12pt;
+    text-align:  justify;
+    hyphens:     auto;
+    text-indent: 0;
+    width:       13cm;
+    margin:      0 auto;
+}
+
+.cover-bottom p {
+    font-size:   12pt;
+    font-weight: 700;
+    text-align:  center;
+    text-indent: 0;
+}
+
+/* ══════════════════════════════════════════════════════
+ * SEÇÕES — fluxo contínuo, sem quebra de página forçada
+ * ══════════════════════════════════════════════════════ */
+section {
+    margin-bottom: 24pt;
+}
+
+/* Headings nunca ficam órfãos no rodapé — o conteúdo que segue
+   fica junto na mesma página. */
+section h2,
+section h3,
+section h4 {
+    break-after:      avoid;
+    page-break-after: avoid;
+}
+
+section h2 {
+    font-size:      12pt;
+    font-weight:    700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    border-bottom:  1.5pt solid #111;
+    padding-bottom: 4pt;
+    margin-bottom:  18pt;
+}
+
+section h3 {
+    font-size:   12pt;
+    font-weight: 700;
+    margin:      14pt 0 6pt;
+}
+
+section h4 {
+    font-size:      11pt;
+    font-weight:    700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin:         14pt 0 6pt;
+    color:          #444;
+}
+
+/* ══════════════════════════════════════════════════════
+ * PARÁGRAFOS — recuo de 1,25 cm (ABNT)
+ * ══════════════════════════════════════════════════════ */
+p {
+    margin-bottom: 0;
+    text-align:    justify;
+    hyphens:       auto;
+    text-indent:   1.25cm;
+    line-height:   1.5;
+}
+
+/* sem recuo em contextos especiais */
+.callout p,
+.cover p,
+.cover-description,
+.table-caption,
+table p,
+.metrics p { text-indent: 0; }
+
+/* ══════════════════════════════════════════════════════
+ * CALLOUTS (caixas destacadas)
+ * ══════════════════════════════════════════════════════ */
+.callout {
+    border-left:       3pt solid;
+    padding:           10pt 14pt;
+    margin:            14pt 0;
+    font-size:         11pt;
+    line-height:       1.5;
+    break-inside:      avoid;
+    page-break-inside: avoid;
+    text-indent:       0;
+    text-align:        justify;
+    hyphens:           auto;
+}
+
+.callout strong {
+    display:        block;
+    margin-bottom:  4pt;
+    font-size:      10pt;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-weight:    700;
+}
+
+.callout-danger  { border-color: #c00; background: #fff5f5; }
+.callout-success { border-color: #080; background: #f0fff4; }
+.callout-info    { border-color: #06c; background: #f0f4ff; }
+.callout-warn    { border-color: #c80; background: #fffbeb; }
+
+/* ══════════════════════════════════════════════════════
+ * CARDS DE CENÁRIO — fluxo contínuo, separados por linha
+ * ══════════════════════════════════════════════════════ */
+.scenario-card {
+    margin-top:  28pt;
+    padding-top: 16pt;
+    border-top:  1.5pt solid #aaa;
+    break-before: auto;
+}
+
+/* O cabeçalho do card nunca fica sozinho no final da página */
+.scenario-header {
+    display:           flex;
+    align-items:       center;
+    gap:               10pt;
+    margin-bottom:     12pt;
+    border-bottom:     1pt solid #bbb;
+    padding-bottom:    6pt;
+    break-after:       avoid;
+    page-break-after:  avoid;
+}
+
+.scenario-num {
+    font-size:   18pt;
+    font-weight: 700;
+    color:       #ccc;
+    line-height: 1;
+}
+
+.scenario-title {
+    font-size:   13pt;
+    font-weight: 700;
+}
+
+/* ══════════════════════════════════════════════════════
+ * BADGES
+ * ══════════════════════════════════════════════════════ */
+.badge {
+    display:     inline-block;
+    padding:     2pt 8pt;
+    border:      1pt solid;
+    border-radius: 10pt;
+    font-size:   9pt;
+    font-weight: 700;
+}
+
+.badge-ok    { background: #e6ffe6; color: #006600; border-color: #006600; }
+.badge-fail  { background: #ffe6e6; color: #cc0000; border-color: #cc0000; }
+.badge-level { background: #e6eeff; color: #003399; border-color: #003399; }
+
+/* ══════════════════════════════════════════════════════
+ * TABELAS — legenda acima (ABNT), sem quebra interna
+ * ══════════════════════════════════════════════════════ */
+
+/* Envolve legenda + tabela num bloco indivisível */
+.table-wrapper {
+    break-inside:      avoid;
+    page-break-inside: avoid;
+}
+
+.table-caption {
+    font-size:         11pt;
+    font-weight:       700;
+    text-align:        left;
+    margin:            16pt 0 4pt;
+    text-indent:       0;
+    break-after:       avoid;
+    page-break-after:  avoid;
+}
+
+table {
+    width:             100%;
+    border-collapse:   collapse;
+    margin:            4pt 0 16pt;
+    font-size:         11pt;
+    break-inside:      avoid;
+    page-break-inside: avoid;
+    -webkit-column-break-inside: avoid;
+}
+
+th {
+    background:  #f0f0f0;
+    color:       #111;
+    padding:     6pt 10pt;
+    text-align:  left;
+    font-weight: 700;
+    border:      1pt solid #999;
+}
+
+td {
+    padding: 5pt 10pt;
+    border:  1pt solid #ccc;
+}
+
+tr:last-child td { }
+
+td.right, th.right   { text-align: right;  }
+td.center, th.center { text-align: center; }
+
+.td-ok    { color: #006600; font-weight: 700; }
+.td-fail  { color: #cc0000; font-weight: 700; }
+.td-warn  { color: #995500; font-weight: 700; }
+.td-muted { color: #666; }
+.row-best td { background: #f0fff0; }
+
+/* ══════════════════════════════════════════════════════
+ * BLOCOS DE CÓDIGO
+ * ══════════════════════════════════════════════════════ */
+pre {
+    background:        #1e293b;
+    color:             #e2e8f0;
+    border-radius:     4pt;
+    padding:           12pt 14pt;
+    margin:            8pt 0;
+    font-size:         9.5pt;
+    line-height:       1.5;
+    font-family:       Consolas, 'Courier New', monospace;
+    break-inside:      avoid;
+    page-break-inside: avoid;
+    white-space:       pre-wrap;
+    word-break:        break-word;
+    overflow:          hidden;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+}
+
+.kw { color: #93c5fd; }
+.fn { color: #6ee7b7; }
+.cm { color: #64748b; }
+.st { color: #fca5a5; }
+.nm { color: #fde68a; }
+
+/* ══════════════════════════════════════════════════════
+ * GRID DE MÉTRICAS
+ * flex-wrap: nowrap força todos os cards numa única linha.
+ * calc() no flex-basis não funciona corretamente no weasyprint.
+ * ══════════════════════════════════════════════════════ */
+.metrics {
+    display:           flex;
+    flex-wrap:         nowrap;
+    gap:               6pt;
+    margin:            12pt 0;
+    break-inside:      avoid;
+    page-break-inside: avoid;
+}
+
+.metric {
+    flex:        1 1 0;
+    min-width:   0;
+    background:  #f5f5f5;
+    border:      1pt solid #ddd;
+    border-radius: 4pt;
+    padding:     8pt;
+    text-align:  center;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+}
+
+.metric-val      { font-size: 14pt; font-weight: 700; color: #003399; }
+.metric-val.ok   { color: #006600; }
+.metric-val.fail { color: #cc0000; }
+.metric-lbl      { font-size: 8pt; color: #666; margin-top: 2pt; }
+
+/* ══════════════════════════════════════════════════════
+ * TIMELINE
+ * ══════════════════════════════════════════════════════ */
+.timeline {
+    font-family:       Consolas, 'Courier New', monospace;
+    font-size:         9.5pt;
+    background:        #1e293b;
+    color:             #e2e8f0;
+    border-radius:     4pt;
+    padding:           12pt 14pt;
+    margin:            8pt 0;
+    white-space:       pre-wrap;
+    word-break:        break-word;
+    overflow:          hidden;
+    break-inside:      avoid;
+    page-break-inside: avoid;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+}
+
+.tl-a   { color: #86efac; }
+.tl-b   { color: #93c5fd; }
+.tl-ok  { color: #86efac; font-weight: 700; }
+.tl-err { color: #fca5a5; font-weight: 700; }
+
+/* ══════════════════════════════════════════════════════
+ * RANKING
+ * ══════════════════════════════════════════════════════ */
+.rank-1 td { background: #fef9c3; }
+.rank-2 td { background: #f0fdf4; }
+.rank-3 td { background: #eff6ff; }
+
+.rank-1 td:first-child::before { content: '🥇 '; }
+.rank-2 td:first-child::before { content: '🥈 '; }
+.rank-3 td:first-child::before { content: '🥉 '; }
+
+/* ══════════════════════════════════════════════════════
+ * IMPRESSÃO
+ * ══════════════════════════════════════════════════════ */
+@media print {
+    body { background: #fff; }
+    section { box-shadow: none; }
+    pre, .timeline { white-space: pre-wrap; }
+}
