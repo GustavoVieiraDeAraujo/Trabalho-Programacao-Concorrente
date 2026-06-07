@@ -141,7 +141,7 @@ Defined in `include/database.h` and `docker-compose.yml`:
 |-----------|-------|
 | Image | `postgres:16-alpine` |
 | Port | `5433` (avoids conflict with local instances on 5432) |
-| User / Password | `banco` / `senha123` |
+| User / Password | `banco` / `banco` |
 | Database | `banco` |
 | Accounts | 10 (table `accounts`) |
 | Initial balance | R$ 1,000.00 per account |

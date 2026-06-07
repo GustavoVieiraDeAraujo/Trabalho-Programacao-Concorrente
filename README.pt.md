@@ -143,7 +143,7 @@ Definida em `include/database.h` e `docker-compose.yml`:
 |-----------|-------|
 | Imagem | `postgres:16-alpine` |
 | Porta | `5433` (evita conflito com instâncias locais na 5432) |
-| Usuário / Senha | `banco` / `senha123` |
+| Usuário / Senha | `banco` / `banco` |
 | Database | `banco` |
 | Contas | 10 (tabela `accounts`) |
 | Saldo inicial | R$ 1.000,00 por conta |
