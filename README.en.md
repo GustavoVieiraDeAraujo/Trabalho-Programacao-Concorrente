@@ -24,6 +24,12 @@ A C program that simulates concurrent bank transfers to demonstrate and measure 
 
 ---
 
+## Demo video
+
+The file [`docs/how_to_run.mp4`](docs/how_to_run.mp4) shows the project running end-to-end: dependency installation, compilation, database startup, scenario execution, and PDF generation.
+
+---
+
 ## Quick start
 
 **Step 1 — install dependencies (Ubuntu/Debian, run once):**

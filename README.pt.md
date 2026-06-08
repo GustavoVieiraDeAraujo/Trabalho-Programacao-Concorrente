@@ -26,6 +26,12 @@ Programa em C que simula transferências bancárias concorrentes para demonstrar
 
 ---
 
+## Demonstração em vídeo
+
+O arquivo [`docs/how_to_run.mp4`](docs/how_to_run.mp4) mostra o projeto sendo executado do início ao fim: instalação das dependências, compilação, subida do banco, execução dos cenários e geração do PDF.
+
+---
+
 ## Como executar
 
 **Passo 1 — instalar dependências (Ubuntu/Debian, executar uma vez):**

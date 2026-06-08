@@ -1,12 +1,18 @@
 /*
  * report.c
  *
- * Generates the HTML report by substituting {{PLACEHOLDER}} tokens in
- * templates/report.html (Portuguese) or templates/report.en.html (English)
- * with live data from the benchmark run.
+ * Geração do relatório HTML substituindo tokens {{PLACEHOLDER}} nos templates
+ * templates/report.html (português) ou templates/report.en.html (inglês)
+ * pelos dados reais coletados durante o experimento.
  *
- * C owns only the numbers (metrics, status, dynamic table rows).
- * All static HTML structure, prose, and CSS live in the templates.
+ * Estratégia de geração:
+ *   - Cada seção dinâmica é acumulada em um buffer de memória (open_memstream).
+ *   - report_close() lê o template inteiro, substitui cada {{CHAVE}} pelo
+ *     conteúdo do buffer correspondente e salva o HTML final.
+ *   - O Makefile então chama weasyprint para converter HTML → PDF.
+ *
+ * O código C é responsável apenas pelos números e tabelas dinâmicas.
+ * Toda a estrutura HTML estática, textos e CSS vivem nos templates.
  */
 
 #define _GNU_SOURCE
@@ -19,13 +25,13 @@
 #include <time.h>
 #include <locale.h>
 
-/* Active language for this report run */
+/* Idioma ativo para este relatório */
 static Lang g_lang;
 
-/* Select between Portuguese and English string literals */
+/* Seleciona entre português e inglês em tempo de execução */
 #define S(pt, en) (g_lang == LANG_PT ? (pt) : (en))
 
-/* ─── In-memory buffers for each placeholder ─────────────────── */
+/* ── Buffers em memória para cada placeholder ────────────────── */
 
 static FILE  *g_config_fp;           char *g_config_buf;           size_t g_config_sz;
 static FILE  *g_scenario_fp[6];      char *g_scenario_buf[6];      size_t g_scenario_sz[6];
@@ -34,13 +40,16 @@ static FILE  *g_summary_fp;          char *g_summary_buf;          size_t g_summ
 static FILE  *g_scaling_fp;          char *g_scaling_buf;          size_t g_scaling_sz;
 static FILE  *g_best_fp;             char *g_best_buf;             size_t g_best_sz;
 
-static char g_generated_at[64];
-static char g_css_buf[65536];
+static char g_generated_at[64]; /* data/hora formatada para o relatório */
+static char g_css_buf[65536];   /* conteúdo do style.css embutido no HTML */
 
+/* Stream ativo no momento: as funções de escrita usam g_cur como destino */
 static FILE *g_cur = NULL;
-static char  g_output_path[80];
+static char  g_output_path[80]; /* caminho do arquivo HTML de saída */
 
-/* ─── Write to the current stream ────────────────────────────── */
+/* ── Escrita no stream ativo ─────────────────────────────────── */
+
+/* Wrapper de fprintf usando o stream g_cur como destino atual */
 static void w(const char *fmt, ...) {
     if (!g_cur) return;
     va_list ap; va_start(ap, fmt);
@@ -48,16 +57,24 @@ static void w(const char *fmt, ...) {
     va_end(ap);
 }
 
-/* ─── Replace one placeholder; returns a new allocation ─────── */
+/* ── Substituição de placeholders ───────────────────────────── */
+
+/*
+ * Substitui todas as ocorrências de 'key' em 'src' por 'val'.
+ * Retorna uma nova alocação com o resultado e libera 'src'.
+ * O chamador não precisa gerenciar memória intermediária: basta encadear
+ * chamadas e liberar o ponteiro final.
+ */
 static char *replace_placeholder(char *src, const char *key, const char *val) {
     if (!val) val = "";
     size_t key_len = strlen(key);
     size_t val_len = strlen(val);
 
+    /* conta ocorrências para calcular o tamanho exato do buffer de saída */
     int count = 0;
     const char *p = src;
     while ((p = strstr(p, key))) { count++; p += key_len; }
-    if (!count) return src;
+    if (!count) return src; /* nenhuma ocorrência: retorna src sem alterar */
 
     size_t src_len = strlen(src);
     char *dst = malloc(src_len + count * (val_len - key_len) + 1);
@@ -70,15 +87,18 @@ static char *replace_placeholder(char *src, const char *key, const char *val) {
         memcpy(out, val, val_len); out += val_len;
         p = hit + key_len;
     }
-    strcpy(out, p);
+    strcpy(out, p); /* copia o restante após a última ocorrência */
     free(src);
     return dst;
 }
 
-/* ─── Read entire file into a heap-allocated string ─────────── */
+/* ── Leitura de arquivo para heap ────────────────────────────── */
+
+/* Lê o conteúdo completo de um arquivo e retorna como string alocada no heap.
+   Retorna NULL se o arquivo não for encontrado. */
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr, "Error: file not found: %s\n", path); return NULL; }
+    if (!f) { fprintf(stderr, "Erro: arquivo nao encontrado: %s\n", path); return NULL; }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     rewind(f);
@@ -89,7 +109,9 @@ static char *read_file(const char *path) {
     return buf;
 }
 
-/* ─── Badge helpers ──────────────────────────────────────────── */
+/* ── Geração de badges (etiquetas de status) ─────────────────── */
+
+/* Retorna o HTML do badge de corretude: verde (correto) ou vermelho (corrompido) */
 static const char *ok_badge(int ok) {
     if (ok)
         return g_lang == LANG_PT
@@ -100,17 +122,26 @@ static const char *ok_badge(int ok) {
         : "<span class=\"badge badge-fail\">&#x274C; CORRUPTED</span>";
 }
 
+/* Retorna o rótulo do nível de controle (Nenhum / Aplicação / Banco) */
 static const char *level_badge(Mode mode) {
     static const char *lbl_pt[] = { "Nenhum", "Aplicação", "Aplicação", "Banco", "Banco", "Banco" };
     static const char *lbl_en[] = { "None", "Application", "Application", "Database", "Database", "Database" };
     return (g_lang == LANG_PT ? lbl_pt : lbl_en)[mode];
 }
 
+/* Retorna a classe CSS do badge de nível: vermelho para ausência de controle,
+   azul para aplicação, verde para banco */
 static const char *level_css(Mode mode) {
     return (mode <= APP_SEM) ? "badge-level" : "badge-ok";
 }
 
-/* ─── Per-scenario dynamic section (callout + metric cards) ──── */
+/* ── Seção dinâmica de cada cenário (callout + cards de métricas) ─ */
+
+/*
+ * Gera o bloco HTML dinâmico de um cenário: callout de resultado (verde se
+ * correto, vermelho se corrompido) seguido de cards com as métricas numéricas
+ * (discrepância, TPS, tempo, chamadas ao BD, retries).
+ */
 static void write_scenario_dynamic(FILE *fp, Mode mode, const Result *r) {
     int    ok  = (r->discrepancy > -0.01 && r->discrepancy < 0.01);
     double tps = r->n_transfers / (r->ms / 1000.0);
@@ -152,6 +183,7 @@ static void write_scenario_dynamic(FILE *fp, Mode mode, const Result *r) {
         w("</div>\n");
     }
 
+    /* cards de métricas: discrepância, TPS, tempo, chamadas ao BD e retries */
     w("<div class=\"metrics\">\n");
     w("<div class=\"metric\"><div class=\"metric-val %s\">R$ %+.2f</div>"
       "<div class=\"metric-lbl\">%s</div></div>\n",
@@ -166,6 +198,7 @@ static void write_scenario_dynamic(FILE *fp, Mode mode, const Result *r) {
     w("<div class=\"metric\"><div class=\"metric-val\">%d</div>"
       "<div class=\"metric-lbl\">%s</div></div>\n",
       r->db_calls, S("Chamadas ao BD", "DB Calls"));
+    /* retries só são relevantes no modo SERIALIZABLE */
     if (mode == DB_SERIALIZABLE)
         w("<div class=\"metric\"><div class=\"metric-val %s\">%d</div>"
           "<div class=\"metric-lbl\">Retries</div></div>\n",
@@ -175,6 +208,7 @@ static void write_scenario_dynamic(FILE *fp, Mode mode, const Result *r) {
     g_cur = prev;
 }
 
+/* Gera os badges de corretude e nível de controle para o cabeçalho do cenário */
 static void write_scenario_badges(FILE *fp, Mode mode, const Result *r) {
     int ok = (r->discrepancy > -0.01 && r->discrepancy < 0.01);
     FILE *prev = g_cur;
@@ -185,12 +219,18 @@ static void write_scenario_badges(FILE *fp, Mode mode, const Result *r) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * Public API
+ * API pública (chamada em sequência pelo main)
  * ═══════════════════════════════════════════════════════════════ */
 
+/*
+ * Inicializa os buffers de memória para cada placeholder, define o idioma
+ * e lê o CSS do template para embutir inline no HTML.
+ * Deve ser a primeira função chamada antes de qualquer report_*().
+ */
 void report_open(Lang lang) {
     g_lang = lang;
 
+    /* configura locale para formatação de datas no idioma correto */
     if (lang == LANG_PT)
         setlocale(LC_TIME, "pt_BR.UTF-8");
     else
@@ -199,16 +239,19 @@ void report_open(Lang lang) {
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
 
+    /* monta o caminho do arquivo de saída com timestamp para evitar sobrescrita */
     const char *fname_fmt = (lang == LANG_PT)
         ? "results/report_%Y%m%d_%H%M%S.pt.html"
         : "results/report_%Y%m%d_%H%M%S.en.html";
     strftime(g_output_path, sizeof(g_output_path), fname_fmt, t);
 
+    /* formata a data de geração para exibição no relatório */
     const char *date_fmt = (lang == LANG_PT)
         ? "%d de %B de %Y, %H:%M"
         : "%B %d, %Y, %H:%M";
     strftime(g_generated_at, sizeof(g_generated_at), date_fmt, t);
 
+    /* cria os buffers de memória (open_memstream: arquivo em RAM) */
     g_config_fp  = open_memstream(&g_config_buf,  &g_config_sz);
     g_summary_fp = open_memstream(&g_summary_buf, &g_summary_sz);
     g_scaling_fp = open_memstream(&g_scaling_buf, &g_scaling_sz);
@@ -218,15 +261,17 @@ void report_open(Lang lang) {
         g_badges_fp[i]   = open_memstream(&g_badges_buf[i],   &g_badges_sz[i]);
     }
 
+    /* lê o CSS e armazena para embutir inline: evita dependência de arquivo externo no PDF */
     char *css = read_file("templates/style.css");
     if (css) {
         strncpy(g_css_buf, css, sizeof(g_css_buf) - 1);
         free(css);
     }
 
-    printf("Report (%s): %s\n", lang == LANG_PT ? "PT" : "EN", g_output_path);
+    printf("Relatorio (%s): %s\n", lang == LANG_PT ? "PT" : "EN", g_output_path);
 }
 
+/* Gera as linhas da tabela de configuração ({{CFG_ROWS}}) */
 void report_header(int threads, int transfers) {
     g_cur = g_config_fp;
 
@@ -269,12 +314,18 @@ void report_header(int threads, int transfers) {
     g_cur = NULL;
 }
 
+/* Delega a geração da seção dinâmica e dos badges do cenário 'num' */
 void report_scenario(int num, Mode mode, const Result *r) {
     int idx = num - 1;
     write_scenario_dynamic(g_scenario_fp[idx], mode, r);
     write_scenario_badges(g_badges_fp[idx], mode, r);
 }
 
+/*
+ * Gera as linhas da tabela comparativa ({{SUMMARY_ROWS}}) e o callout
+ * do melhor resultado ({{BEST_CALLOUT}}).
+ * O mecanismo campeão é o de maior TPS entre os que produziram dados corretos.
+ */
 void report_summary(const Result res[], int n) {
     double best_tps = 0; int best_idx = -1;
     for (int i = 0; i < n; i++) {
@@ -295,6 +346,7 @@ void report_summary(const Result res[], int n) {
         "badge-fail","badge-level","badge-level","badge-ok","badge-ok","badge-ok"
     };
 
+    /* ranking visual: as três primeiras linhas corretas recebem classes CSS de destaque */
     int rank = 0;
     static const char *rank_css[] = {"rank-1","rank-2","rank-3","","",""};
 
@@ -320,6 +372,7 @@ void report_summary(const Result res[], int n) {
     }
     g_cur = NULL;
 
+    /* callout do campeão (mecanismo correto de maior TPS) */
     if (best_idx >= 0) {
         g_cur = g_best_fp;
         w("<div class=\"callout callout-success\">"
@@ -333,6 +386,10 @@ void report_summary(const Result res[], int n) {
     }
 }
 
+/*
+ * Gera as linhas da tabela de escalabilidade ({{SCALING_ROWS}}).
+ * Células com dados corrompidos recebem indicador visual (⚠️).
+ */
 void report_scaling(const Mode modes[], int nm,
                     const int threads[] __attribute__((unused)), int nt,
                     double tps[][4], int ok[][4]) {
@@ -344,6 +401,7 @@ void report_scaling(const Mode modes[], int nm,
             if (ok[i][j])
                 w("<td class=\"center\">%.0f/s</td>", tps[i][j]);
             else
+                /* ⚠️ indica que o saldo ficou corrompido nesta configuração */
                 w("<td class=\"center td-fail\">%.0f/s &#x26A0;</td>", tps[i][j]);
         }
         w("</tr>\n");
@@ -351,11 +409,18 @@ void report_scaling(const Mode modes[], int nm,
     g_cur = NULL;
 }
 
+/* Reservado para conclusão adicional; o texto principal está no template. */
 void report_conclusion(const Result res[], int n) {
     (void)res; (void)n;
 }
 
+/*
+ * Fecha todos os buffers de memória, lê o template HTML, substitui cada
+ * {{PLACEHOLDER}} pelo buffer correspondente e salva o arquivo de saída.
+ * Libera toda a memória alocada.
+ */
 void report_close(void) {
+    /* fecha os streams: o conteúdo dos buffers só fica disponível após fclose */
     fclose(g_config_fp);
     fclose(g_summary_fp);
     fclose(g_scaling_fp);
@@ -365,6 +430,7 @@ void report_close(void) {
         fclose(g_badges_fp[i]);
     }
 
+    /* seleciona o template no idioma correto */
     const char *tmpl = (g_lang == LANG_PT)
         ? "templates/report.html"
         : "templates/report.en.html";
@@ -372,6 +438,7 @@ void report_close(void) {
     char *html = read_file(tmpl);
     if (!html) return;
 
+    /* substitui todos os placeholders pelos dados coletados */
     html = replace_placeholder(html, "{{CSS}}",           g_css_buf);
     html = replace_placeholder(html, "{{GENERATED_AT}}",  g_generated_at);
     html = replace_placeholder(html, "{{CFG_ROWS}}",      g_config_buf);
@@ -394,6 +461,7 @@ void report_close(void) {
     FILE *out = fopen(g_output_path, "w");
     if (out) { fputs(html, out); fclose(out); }
 
+    /* libera todos os buffers alocados */
     free(html);
     free(g_config_buf); free(g_summary_buf); free(g_scaling_buf); free(g_best_buf);
     for (int i = 0; i < 6; i++) {
