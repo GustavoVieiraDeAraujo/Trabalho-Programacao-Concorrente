@@ -2,8 +2,6 @@
 
 Projeto da disciplina **Programacao Concorrente** do Departamento de Ciencia da Computacao da Universidade de Brasilia ([especificacao](./docs/project_specification.pdf)). Programa em C que simula transferencias bancarias concorrentes para demonstrar e medir o impacto de race conditions, testando 6 mecanismos de sincronizacao com 500 transferencias paralelas entre 10 contas. Gera relatorio PDF automaticamente.
 
-🇺🇸 English version: [README.en.md](README.en.md)
-
 ---
 
 ## Sumario
@@ -34,7 +32,7 @@ Projeto da disciplina **Programacao Concorrente** do Departamento de Ciencia da 
 
 | Tecnologia         | Uso                                                      |
 |--------------------|----------------------------------------------------------|
-| C (GCC >= 9)       | Linguagem principal — threads, mutex, semaforos           |
+| C (GCC >= 9)       | Linguagem principal: threads, mutex, semaforos           |
 | PostgreSQL 16      | Banco de dados para os cenarios de sincronizacao em BD    |
 | libpq              | Driver PostgreSQL para C                                  |
 | Docker + Compose   | Containerizacao do PostgreSQL                             |
@@ -136,7 +134,7 @@ O `make start` executa em sequencia:
 
 O relatorio e salvo em `results/report_YYYYMMDD_HHMMSS.pdf`.
 
-> `results/`, `bin/` e `build/` estao no `.gitignore` — sao gerados em tempo de execucao.
+> `results/`, `bin/` e `build/` estao no `.gitignore`, pois sao gerados em tempo de execucao.
 
 ---
 
@@ -148,14 +146,7 @@ O programa usa o padrao **produtor-consumidor** com uma fila de trabalho circula
 
 **Fluxo de um cenario:**
 
-```
-1. db_reset()           → zera saldos e garante estado limpo
-2. Produtor             → gera N transferencias aleatorias e empurra na fila
-3. N workers em paralelo → consomem a fila, cada um com sua conexao ao banco
-4. Fila vazia           → todos os workers encerram
-5. db_total()           → soma saldos e compara com valor inicial
-6. Diferenca != 0       → race condition detectada
-```
+![Fluxo de um cenario](docs/fluxo_cenario.svg)
 
 ---
 
@@ -163,24 +154,20 @@ O programa usa o padrao **produtor-consumidor** com uma fila de trabalho circula
 
 | # | Mecanismo | Nivel | Descricao |
 |---|-----------|-------|-----------|
-| 1 | Sem controle | — | Leitura e escrita sem protecao — demonstra o problema |
+| 1 | Sem controle | - | Leitura e escrita sem protecao (demonstra o problema) |
 | 2 | `pthread_mutex_t` | Aplicacao | Mutex global protege a secao critica (leitura + escrita) |
 | 3 | `sem_t` (semaforo POSIX) | Aplicacao | Semaforo binario como alternativa ao mutex |
-| 4 | `SELECT FOR UPDATE` | Banco de dados | Lock pessimista por linha — trava a conta durante a transacao |
+| 4 | `SELECT FOR UPDATE` | Banco de dados | Lock pessimista por linha, que trava a conta durante a transacao |
 | 5 | `SERIALIZABLE` + retry | Banco de dados | Isolamento maximo com retry automatico em caso de conflito |
-| 6 | `UPDATE` atomico | Banco de dados | `UPDATE SET saldo = saldo + X` sem leitura previa — operacao atomica |
+| 6 | `UPDATE` atomico | Banco de dados | `UPDATE SET saldo = saldo + X` sem leitura previa, uma operacao atomica |
 
 ---
 
 ## Geracao do Relatorio
 
-O relatorio nao usa biblioteca de PDF — o processo tem tres etapas:
+O relatorio nao usa biblioteca de PDF. O processo tem tres etapas:
 
-```
-1. C gera HTML     → report.c le templates/report.html, substitui {{PLACEHOLDER}} por dados reais
-2. Python converte → weasyprint transforma o HTML em PDF
-3. HTML e apagado  → apenas o PDF final fica em results/
-```
+![Geracao do relatorio](docs/fluxo_relatorio.svg)
 
 Placeholders disponiveis no template:
 
@@ -209,3 +196,7 @@ Definida em `include/database.h` e `docker-compose.yml`:
 | Database       | `banco`                   |
 | Contas         | 10 (tabela `accounts`)    |
 | Saldo inicial  | R$ 1.000,00 por conta     |
+
+---
+
+> Documentacao gerada com auxilio de IA.
